@@ -172,12 +172,22 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function escapeHtml(str) {
-    if (!str) return '';
+    if (str === null || str === undefined) return '';
     return String(str)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function sanitizeImageUri(uri) {
+    if (!uri || typeof uri !== 'string') return null;
+    const trimmed = uri.trim();
+    if (trimmed.startsWith('data:image/') || trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
+      return escapeHtml(trimmed);
+    }
+    return null;
   }
 
   function formatBytes(bytes) {
@@ -363,9 +373,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     let bannerHtml = '';
+    const safeThumbnail = sanitizeImageUri(pack.thumbnail);
 
-    if (pack.thumbnail) {
-      bannerHtml = `<img src="${pack.thumbnail}" alt="${escapeHtml(pack.name)}" loading="lazy">`;
+    if (safeThumbnail) {
+      bannerHtml = `<img src="${safeThumbnail}" alt="${escapeHtml(pack.name)}" loading="lazy">`;
     } else {
       bannerHtml = `
         <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; color: #475569; width: 100%; height: 100%;">
@@ -425,7 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="card-banner">
         ${bannerHtml}
         <div class="banner-tag-left">
-          <span class="badge-tag ${loaderClass}">${loaderLabel}</span>
+          <span class="badge-tag ${loaderClass}">${escapeHtml(loaderLabel)}</span>
           ${pack.packVersion ? `<span class="badge-tag tag-pack-ver">${escapeHtml(pack.packVersion)}</span>` : ''}
           <span class="badge-tag tag-mc">MC ${escapeHtml(pack.gameVersion)}</span>
         </div>
@@ -727,12 +738,13 @@ document.addEventListener('DOMContentLoaded', () => {
     drawerModsCount.textContent = `${pack.modCount} Mods`;
     drawerStatus.textContent = pack.status.replace('_', ' ').toUpperCase();
 
-    if (pack.thumbnail) {
-      drawerBannerContainer.innerHTML = `<img src="${pack.thumbnail}" style="width: 100%; height: 100%; object-fit: cover;">`;
+    const safeDrawerThumb = sanitizeImageUri(pack.thumbnail);
+    if (safeDrawerThumb) {
+      drawerBannerContainer.innerHTML = `<img src="${safeDrawerThumb}" alt="${escapeHtml(pack.name)}" style="width: 100%; height: 100%; object-fit: cover;">`;
     } else {
       drawerBannerContainer.innerHTML = `
         <div style="color: #64748b; font-family: monospace; font-size: 11px; font-weight: 700;">
-          MC ${pack.gameVersion}
+          MC ${escapeHtml(pack.gameVersion)}
         </div>
       `;
     }

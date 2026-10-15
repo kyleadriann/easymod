@@ -175,7 +175,26 @@ async function runTests() {
   if (origVersion) {
     setLauncherSelectedVersion(origVersion, cfg);
   }
-  console.log('   ✓ Original launcher version restored.\n');
+  // Test 5: Security Defenses & Path Traversal Guards
+  console.log('5. Testing Security Defenses & Path Traversal Sanitization...');
+  
+  const traversalTest1 = sanitizeName('../../../secret_escape');
+  if (traversalTest1.includes('..') || traversalTest1.includes('/') || traversalTest1.includes('\\')) {
+    throw new Error(`sanitizeName failed traversal test: ${traversalTest1}`);
+  }
+  console.log(`   ✓ sanitizeName('../../../secret_escape') -> "${traversalTest1}" (traversal stripped)`);
+
+  const traversalTest2 = sanitizeName('..');
+  if (traversalTest2 === '..' || traversalTest2.includes('.')) {
+    throw new Error(`sanitizeName failed bare dots test: ${traversalTest2}`);
+  }
+  console.log(`   ✓ sanitizeName('..') -> "${traversalTest2}" (safe default used)`);
+
+  const nullByteTest = sanitizeName('modpack\0name');
+  if (nullByteTest.includes('\0')) {
+    throw new Error('sanitizeName failed null byte test');
+  }
+  console.log(`   ✓ sanitizeName('modpack\\0name') -> "${nullByteTest}" (null byte stripped)\n`);
 
   console.log('=== All Engine Tests Passed Successfully! ===');
 }

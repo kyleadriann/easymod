@@ -9,12 +9,25 @@ function cancelCurrentSync() {
 }
 
 /**
- * Collect all files to be copied from CurseForge instance to home folder.
+ * Security helper: Ensure child path strictly stays within parent directory boundaries.
+ */
+function assertPathInside(parentDir, childDir, label = 'path') {
+  const resolvedParent = path.resolve(parentDir);
+  const resolvedChild = path.resolve(childDir);
+  const rel = path.relative(resolvedParent, resolvedChild);
+  if (rel.startsWith('..') || path.isAbsolute(rel) || rel === '') {
+    throw new Error(`Security Exception: Target ${label} escapes parent directory boundary (${childDir})`);
+  }
+}
+
+/**
+ * Collect all files to be copied from CurseForge instance to home folder safely.
  * Recursively copies everything from the CurseForge instance,
- * excluding only internal cache/git files, and saves (unless includeSaves is enabled).
+ * excluding internal cache/git files, saves (unless enabled), and symlinks that escape instanceDir.
  */
 async function collectFilesToCopy(instanceDir, includeSaves = false) {
   const files = [];
+  const resolvedInstanceDir = path.resolve(instanceDir);
 
   const ignoredDirs = new Set(['.git', '.curseclient', 'cache']);
   if (!includeSaves) {
@@ -22,6 +35,13 @@ async function collectFilesToCopy(instanceDir, includeSaves = false) {
   }
 
   async function walk(currentDir) {
+    // Prevent traversal out of instance directory
+    const resolvedCurrent = path.resolve(currentDir);
+    if (!resolvedCurrent.startsWith(resolvedInstanceDir)) {
+      console.warn('Blocked directory traversal escape:', currentDir);
+      return;
+    }
+
     let entries;
     try {
       entries = await fs.readdir(currentDir, { withFileTypes: true });
@@ -32,7 +52,12 @@ async function collectFilesToCopy(instanceDir, includeSaves = false) {
 
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name);
-      const relPath = path.relative(instanceDir, fullPath);
+      const relPath = path.relative(resolvedInstanceDir, path.resolve(fullPath));
+
+      // Guard: Ensure relative path does not escape root
+      if (relPath.startsWith('..') || path.isAbsolute(relPath)) {
+        continue;
+      }
 
       if (entry.isDirectory()) {
         if (ignoredDirs.has(entry.name)) {
@@ -108,6 +133,10 @@ async function syncModpack(options, onProgress) {
   const targetVersionDir = path.join(versionsDir, targetName);
   const homeDir = path.join(minecraftPath, 'home');
   const targetHomeDir = path.join(homeDir, targetName);
+
+  // Security: Assert that target directories never escape their designated parents
+  assertPathInside(versionsDir, targetVersionDir, 'versions directory');
+  assertPathInside(homeDir, targetHomeDir, 'home directory');
 
   const emitProgress = (payload) => {
     if (typeof onProgress === 'function') {
@@ -295,6 +324,7 @@ async function syncModpack(options, onProgress) {
 
     const item = filesToCopy[i];
     const destPath = path.join(targetHomeDir, item.relPath);
+    assertPathInside(targetHomeDir, destPath, 'destination file');
 
     await fs.ensureDir(path.dirname(destPath));
     await fs.copy(item.sourcePath, destPath, { overwrite: true });

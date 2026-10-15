@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
-const { spawn, exec } = require('child_process');
+const { spawn } = require('child_process');
 const { 
   loadConfig, 
   saveConfig, 
@@ -28,8 +28,32 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
+  });
+
+  // Security: Prevent navigating the main window to remote/untrusted URLs
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    try {
+      const parsed = new URL(navigationUrl);
+      if (parsed.protocol !== 'file:') {
+        event.preventDefault();
+        shell.openExternal(navigationUrl);
+      }
+    } catch (_) {
+      event.preventDefault();
+    }
+  });
+
+  // Security: Block unauthorized popups and new windows, opening external links in default browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+        shell.openExternal(url);
+      }
+    } catch (_) {}
+    return { action: 'deny' };
   });
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -186,13 +210,26 @@ ipcMain.handle('cancel-sync', async () => {
   return true;
 });
 
-// IPC Handler: Open Path in Windows Explorer
+// IPC Handler: Open Path in Windows Explorer (Restricted strictly to local directories)
 ipcMain.handle('open-path', async (_, targetPath) => {
-  if (!targetPath) return false;
+  if (!targetPath || typeof targetPath !== 'string') return false;
+
+  // Prevent UNC / network share relaying (e.g. \\attacker\share)
+  const normalized = path.normalize(targetPath);
+  if (targetPath.startsWith('\\\\') || targetPath.startsWith('//') || normalized.startsWith('\\\\')) {
+    console.warn('Blocked attempt to open UNC path:', targetPath);
+    return false;
+  }
+
   try {
     if (await fs.pathExists(targetPath)) {
-      await shell.openPath(targetPath);
-      return true;
+      const stat = await fs.stat(targetPath);
+      // Strictly restrict open-path to directories only
+      if (stat.isDirectory()) {
+        await shell.openPath(targetPath);
+        return true;
+      }
+      console.warn('Blocked opening non-directory path:', targetPath);
     }
   } catch (err) {
     console.error('Failed opening path:', err);
@@ -200,15 +237,25 @@ ipcMain.handle('open-path', async (_, targetPath) => {
   return false;
 });
 
-// Helper: Launch Launcher Process reliably
+// Helper: Launch Launcher Process reliably and safely without shell interpolation
 async function launchLauncherProcess(launcherPath) {
-  if (!launcherPath || !(await fs.pathExists(launcherPath))) {
+  if (!launcherPath || typeof launcherPath !== 'string' || !(await fs.pathExists(launcherPath))) {
     return { success: false, error: 'Launcher executable not found. Please set your launcher path in Settings.' };
+  }
+
+  // Prevent UNC paths
+  if (launcherPath.startsWith('\\\\') || launcherPath.startsWith('//')) {
+    return { success: false, error: 'Network UNC paths are not permitted for security.' };
+  }
+
+  // Ensure target is strictly an executable file (.exe)
+  if (!launcherPath.toLowerCase().endsWith('.exe')) {
+    return { success: false, error: 'Only executable (.exe) files can be launched.' };
   }
 
   const launcherDir = path.dirname(launcherPath);
 
-  // Strategy 1: Electron shell.openPath (native OS ShellExecute)
+  // Strategy 1: Electron shell.openPath (native OS ShellExecute for .exe)
   try {
     const err = await shell.openPath(launcherPath);
     if (!err) {
@@ -219,30 +266,18 @@ async function launchLauncherProcess(launcherPath) {
     console.warn('shell.openPath failed, trying fallback:', openErr);
   }
 
-  // Strategy 2: child_process.spawn with working directory set to launcher directory
+  // Strategy 2: child_process.spawn with working directory set to launcher directory (shell: false)
   try {
     const child = spawn(launcherPath, [], {
       cwd: launcherDir,
       detached: true,
-      stdio: 'ignore'
+      stdio: 'ignore',
+      shell: false // Security: Strictly disable shell to prevent command injection
     });
     child.unref();
     return { success: true, launcherPath, method: 'spawn' };
   } catch (spawnErr) {
-    console.warn('spawn failed, trying cmd start fallback:', spawnErr);
-  }
-
-  // Strategy 3: cmd /c start
-  try {
-    await new Promise((resolve, reject) => {
-      exec(`start "" /D "${launcherDir}" "${launcherPath}"`, (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-    return { success: true, launcherPath, method: 'cmd' };
-  } catch (cmdErr) {
-    return { success: false, error: cmdErr.message || 'Failed to start launcher process' };
+    return { success: false, error: spawnErr.message || 'Failed to start launcher process' };
   }
 }
 

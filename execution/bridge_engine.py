@@ -29,9 +29,15 @@ def get_default_paths():
     return mc_path, cf_path
 
 def sanitize_name(name: str) -> str:
+    if not name:
+        return "Modpack"
+    name = name.replace("\0", "")
+    while ".." in name:
+        name = name.replace("..", "")
     for ch in '<>:"/\\|?*':
         name = name.replace(ch, "_")
-    return name.strip()
+    name = name.strip().strip(".")
+    return name if name else "Modpack"
 
 def scan_installed_versions(mc_path: str):
     versions_dir = os.path.join(mc_path, "versions")

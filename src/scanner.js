@@ -29,11 +29,19 @@ function getThumbnailsCacheDir() {
 }
 
 /**
- * Sanitize folder/version name for Windows filesystem compatibility.
+ * Sanitize folder/version name for Windows filesystem compatibility and path traversal prevention.
  */
 function sanitizeName(name) {
-  if (!name) return 'Modpack';
-  return name.replace(/[<>:"/\\|?*]/g, '_').trim();
+  if (!name || typeof name !== 'string') return 'Modpack';
+  // Remove null bytes, path traversal sequences (..), and Windows-illegal characters
+  let clean = name
+    .replace(/\0/g, '')
+    .replace(/\.\.+/g, '')
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .trim();
+  // Strip leading and trailing dots / spaces which are problematic on Windows filesystems
+  clean = clean.replace(/^\.+|\.+$/g, '').trim();
+  return clean || 'Modpack';
 }
 
 /**
@@ -42,7 +50,7 @@ function sanitizeName(name) {
  */
 function imageToDataUri(filePath) {
   try {
-    if (!filePath || !fs.existsSync(filePath)) return null;
+    if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) return null;
     const ext = path.extname(filePath).toLowerCase();
     let mime = 'image/png';
     if (ext === '.jpg' || ext === '.jpeg') mime = 'image/jpeg';
@@ -60,32 +68,44 @@ function imageToDataUri(filePath) {
 const apiMetadataCache = new Map();
 
 /**
- * Fetch official modpack logo and author info from CurseForge API
+ * Fetch official modpack logo and author info from CurseForge API safely
  */
 async function fetchCurseForgeMetadata(projectID) {
   if (!projectID) return null;
-  if (apiMetadataCache.has(projectID)) {
-    return apiMetadataCache.get(projectID);
+  
+  // Security: projectID must be strictly a positive numeric identifier
+  const safeProjectId = String(projectID).trim();
+  if (!/^\d+$/.test(safeProjectId)) {
+    return null;
+  }
+
+  if (apiMetadataCache.has(safeProjectId)) {
+    return apiMetadataCache.get(safeProjectId);
   }
 
   const cacheDir = getThumbnailsCacheDir();
-  const metaPath = path.join(cacheDir, `${projectID}_meta.json`);
+  const metaPath = path.join(cacheDir, `${safeProjectId}_meta.json`);
 
   // Check cached JSON metadata first
   if (fs.existsSync(metaPath)) {
     try {
       const cached = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-      apiMetadataCache.set(projectID, cached);
+      apiMetadataCache.set(safeProjectId, cached);
       return cached;
     } catch (_) {}
   }
 
+  // AbortController timeout for API request (7 seconds)
+  const apiController = new AbortController();
+  const apiTimeout = setTimeout(() => apiController.abort(), 7000);
+
   try {
-    const res = await fetch(`https://api.curseforge.com/v1/mods/${projectID}`, {
+    const res = await fetch(`https://api.curseforge.com/v1/mods/${safeProjectId}`, {
       headers: {
         'Accept': 'application/json',
         'x-api-key': CF_API_KEY
-      }
+      },
+      signal: apiController.signal
     });
 
     if (!res.ok) return null;
@@ -99,25 +119,51 @@ async function fetchCurseForgeMetadata(projectID) {
       : '';
 
     let localImagePath = null;
-    if (logoUrl) {
-      const ext = path.extname(new URL(logoUrl).pathname) || '.png';
-      const savePath = path.join(cacheDir, `${projectID}${ext}`);
+    if (logoUrl && typeof logoUrl === 'string') {
+      try {
+        const parsedUrl = new URL(logoUrl);
+        // Only permit http / https image downloads
+        if (['http:', 'https:'].includes(parsedUrl.protocol)) {
+          let ext = path.extname(parsedUrl.pathname).toLowerCase();
+          const allowedExts = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg'];
+          if (!allowedExts.includes(ext)) {
+            ext = '.png';
+          }
+          const savePath = path.join(cacheDir, `${safeProjectId}${ext}`);
 
-      // Download if not already saved
-      if (!fs.existsSync(savePath)) {
-        const imgRes = await fetch(logoUrl);
-        if (imgRes.ok) {
-          const buffer = Buffer.from(await imgRes.arrayBuffer());
-          fs.writeFileSync(savePath, buffer);
-          localImagePath = savePath;
+          // Download if not already saved
+          if (!fs.existsSync(savePath)) {
+            const imgController = new AbortController();
+            const imgTimeout = setTimeout(() => imgController.abort(), 8000);
+            try {
+              const imgRes = await fetch(logoUrl, { signal: imgController.signal });
+              if (imgRes.ok) {
+                const contentLength = parseInt(imgRes.headers.get('content-length') || '0', 10);
+                const contentType = (imgRes.headers.get('content-type') || '').toLowerCase();
+                
+                // Security: Enforce 5MB ceiling and image MIME type
+                if (contentLength <= 5 * 1024 * 1024 && (contentType.startsWith('image/') || !contentType)) {
+                  const buffer = Buffer.from(await imgRes.arrayBuffer());
+                  if (buffer.length <= 5 * 1024 * 1024) {
+                    fs.writeFileSync(savePath, buffer);
+                    localImagePath = savePath;
+                  }
+                }
+              }
+            } catch (_) {
+              // Gracefully handle download failure or timeout
+            } finally {
+              clearTimeout(imgTimeout);
+            }
+          } else {
+            localImagePath = savePath;
+          }
         }
-      } else {
-        localImagePath = savePath;
-      }
+      } catch (_) {}
     }
 
     const result = {
-      projectID,
+      projectID: safeProjectId,
       authors,
       logoUrl,
       localImagePath
@@ -128,10 +174,12 @@ async function fetchCurseForgeMetadata(projectID) {
       fs.writeFileSync(metaPath, JSON.stringify(result, null, 2), 'utf8');
     } catch (_) {}
 
-    apiMetadataCache.set(projectID, result);
+    apiMetadataCache.set(safeProjectId, result);
     return result;
   } catch (err) {
     return null;
+  } finally {
+    clearTimeout(apiTimeout);
   }
 }
 
